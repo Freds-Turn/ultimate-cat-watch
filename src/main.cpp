@@ -1,78 +1,95 @@
-/**
- * Simple clock display interface, power consumption is about 20mA
- * Written by lewishe
- * */
 #include "config.h"
 
-typedef struct {
-    lv_obj_t *hour;
-    lv_obj_t *minute;
-    lv_obj_t *second;
-} str_datetime_t;
-
-
-static str_datetime_t g_data;
-TTGOClass *watch = nullptr;
-PCF8563_Class *rtc;
-LV_IMG_DECLARE(cat_png);
-LV_FONT_DECLARE(cat_font);
+TTGOClass *watch;
+TFT_eSPI *tft;
+AXP20X_Class *power;
+bool irq = false;
 
 void setup()
 {
-    Serial.begin(115200);
+    // Get TTGOClass instance
     watch = TTGOClass::getWatch();
+
+    // Initialize the hardware, the BMA423 sensor has been initialized internally
     watch->begin();
-    watch->lvgl_begin();
-    rtc = watch->rtc;
 
-    // Use compile time
-    rtc->check();
-
+    // Turn on the backlight
     watch->openBL();
 
-    //Lower the brightness
-    watch->bl->adjust(150);
+    //Receive objects for easy writing
+    tft = watch->tft;
+    power = watch->power;
 
-    lv_obj_t *img1 = lv_img_create(lv_scr_act(), NULL);
-    lv_img_set_src(img1, &cat_png);
-    lv_obj_align(img1, NULL, LV_ALIGN_CENTER, 0, 0);
+    tft->setTextColor(TFT_GREEN);
 
-    static lv_style_t style;
-    lv_style_init(&style);
-    lv_style_set_text_color(&style, LV_STATE_DEFAULT, LV_COLOR_WHITE);
-    lv_style_set_text_font(&style, LV_STATE_DEFAULT, &cat_font);
+    pinMode(AXP202_INT, INPUT_PULLUP);
+    attachInterrupt(
+        AXP202_INT, [] {
+            irq = true;
+        },
+        FALLING);
 
-    g_data.hour = lv_label_create(img1, nullptr);
-    lv_obj_add_style(g_data.hour, LV_OBJ_PART_MAIN, &style);
+    // Must be enabled first, and then clear the interrupt status,
+    // otherwise abnormal
+    power->enableIRQ(AXP202_PEK_SHORTPRESS_IRQ,
+                     true);
 
-    lv_label_set_text(g_data.hour, "00");
-    lv_obj_align(g_data.hour, img1, LV_ALIGN_IN_TOP_MID, 10, 30);
+    //  Clear interrupt status
+    power->clearIRQ();
 
-    g_data.minute = lv_label_create(img1, nullptr);
-    lv_obj_add_style(g_data.minute, LV_OBJ_PART_MAIN, &style);
-    lv_label_set_text(g_data.minute, "00");
-    lv_obj_align(g_data.minute, g_data.hour, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+    tft->println("Wait for the PEKKey interrupt to come...");
 
-    g_data.second = lv_label_create(img1, nullptr);
-    lv_obj_add_style(g_data.second, LV_OBJ_PART_MAIN, &style);
-    lv_label_set_text(g_data.second, "00");
-    lv_obj_align(g_data.second, g_data.minute, LV_ALIGN_OUT_RIGHT_MID, 9, 0);
+    // Wait for the power button to be pressed
+    while (!irq)
+    {
+        delay(1000);
+    }
+    /*
+    After the AXP202 interrupt is triggered, the interrupt status must be cleared,
+    * otherwise the next interrupt will not be triggered
+    */
+    power->clearIRQ();
 
-    lv_task_create([](lv_task_t *t) {
+    for (int i = 5; i > 0; i--)
+    {
+        tft->print("Go to sleep after ");
+        tft->print(i);
+        tft->println(" seconds");
+        delay(1000);
+    }
+    tft->println("Sleep now ...");
+    delay(1000);
 
-        RTC_Date curr_datetime = rtc->getDateTime();
-        lv_label_set_text_fmt(g_data.second, "%02u", curr_datetime.second);
-        lv_label_set_text_fmt(g_data.minute, "%02u", curr_datetime.minute);
-        lv_label_set_text_fmt(g_data.hour, "%02u", curr_datetime.hour);
+    // Set screen and touch to sleep mode
+    watch->displaySleep();
 
-    }, 1000, LV_TASK_PRIO_MID, nullptr);
+    /*
+    When using T - Watch2020V1, you can directly call power->powerOff(),
+    if you use the 2019 version of TWatch, choose to turn off
+    according to the power you need to turn off
+    */
+#ifdef LILYGO_WATCH_2020_V1
+    watch->powerOff();
+    // LDO2 is used to power the display, and LDO2 can be turned off if needed
+    // power->setPowerOutPut(AXP202_LDO2, false);
+#else
+    power->setPowerOutPut(AXP202_LDO3, false);
+    power->setPowerOutPut(AXP202_LDO4, false);
+    power->setPowerOutPut(AXP202_LDO2, false);
+    // The following power channels are not used
+    power->setPowerOutPut(AXP202_EXTEN, false);
+    power->setPowerOutPut(AXP202_DCDC2, false);
+#endif
 
-    // Set 20MHz operating speed to reduce power consumption
-    setCpuFrequencyMhz(20);
+    // Use ext0 for external wakeup
+    // esp_sleep_enable_ext0_wakeup((gpio_num_t)AXP202_INT, LOW);
 
+    // Use ext1 for external wakeup
+    esp_sleep_enable_ext1_wakeup(GPIO_SEL_35, ESP_EXT1_WAKEUP_ALL_LOW);
+
+    esp_deep_sleep_start();
 }
 
 void loop()
 {
-    lv_task_handler();
 }
